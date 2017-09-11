@@ -13,7 +13,7 @@ train_raw = pd.read_csv("./train.csv")
 test_raw = pd.read_csv("./test.csv")
 
 def preprocess(df):
-    df = df.drop(["Name","Ticket","PassengerId","Cabin"],axis=1)
+
     df["Sex"] = df["Sex"].astype('category').cat.codes
     df["Embarked"] = df["Embarked"].astype('category').cat.codes
     df["Pclass"] = df["Pclass"].fillna(df["Pclass"].mode())
@@ -21,12 +21,23 @@ def preprocess(df):
     df["Age"] = df["Age"].fillna(int(np.ceil(df["Age"].mean())))
     df["SibSp"] = df["SibSp"].fillna(df["SibSp"].mode())
     df["Parch"] = df["Parch"].fillna(df["Parch"].mode())
+    df["FamilySize"] = df["SibSp"]+df["Parch"]
+    df = df.drop([],axis=1)
     df["Fare"] = df["Fare"].fillna(df["Fare"].mean())
     df["Embarked"] = df["Embarked"].fillna(df["Embarked"].mode())
-    '''
-    deckmdoe = int(df["Deck"].map(lambda x:x==-1 and np.nan or x).mode())
-    df["Deck"] = df["Deck"].map(lambda x:x==-1 and deckmdoe or x)
-    '''
+    df["NumberOfRooms"] = df["Cabin"].map(lambda x: type(x)!=float and len(x.split(" ") or x))
+    def func(data):
+        if (type(data) == float): return data
+        result = np.array([])
+        for string in data.split(" "):
+            if (len(result) == 0 or result[-1] != string[0]):
+                result = np.append(result,string[0])
+        if(result.size==1): return result[0]
+        return result[result.argsort()[0]]
+
+    df["Cabin"] = df["Cabin"].map(func).astype('category').cat.codes
+    df["Cabin"] = df["Cabin"].fillna(df["Cabin"].mode())
+    df = df.drop(["Name", "Ticket", "PassengerId", "Parch", "SibSp"], axis=1)
     return df
 
 train = preprocess(train_raw)
@@ -49,7 +60,7 @@ rf_clf.fit(trainX,y)
 
 
 eclf =  VotingClassifier(estimators=[('svc', svm_clf),('lr', lr_clf),
-            ('rf',rf_clf),('NB', NB_clf)], voting='soft', weights=[5,6,9,1])
+            ('rf',rf_clf),('NB', NB_clf)], voting='soft', weights=[5,7,9,1])
 
 for clf, label in zip([svm_clf,lr_clf, rf_clf, NB_clf, eclf],
                       ['Support Vector','Logistic Regression',
