@@ -31,4 +31,4 @@ model.fit_generator(generator,validation_data=generator,validation_steps=100,
 
 model.evaluate_generator(generator,steps=100)
 
-model.save(filepath="predictor.h5",overwrite=True)
+model.save(filepath="./predictor.h5",overwrite=True)
