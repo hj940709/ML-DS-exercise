@@ -18,7 +18,7 @@ def doPost():
         return analysis(misc.imread(request.files['image']))
     except Exception as e:
         print(e)
-        return json.dumps({"status":"Invalid Input"})
+        return json.dumps({"status":500})
 
 def analysis(data):
     def tranfer(class_indices, pred):
@@ -26,13 +26,13 @@ def analysis(data):
         for key in class_indices.keys():
             dist[key] = pred[class_indices[key]]
         return dist
-    result={"status":"Error"}
+    result={"status":400}
     try:
         model = load_model("./predictor.h5")
         class_indices = json.load(open("./class_indices.json","r"))
         pred = model.predict_proba(data.reshape((1,150,150,3))).flatten()
         result["dist"] = tranfer(class_indices,pred)
-        result["status"]="Success"
+        result["status"]=200
     except Exception as e:
         print(e)
     return json.dumps(result)
