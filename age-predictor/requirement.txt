@@ -1,3 +1,6 @@
 keras
+flask
 h5py
 icrawler
+scipy
+numpy
