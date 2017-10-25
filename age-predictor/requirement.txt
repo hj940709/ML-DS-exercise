@@ -4,3 +4,6 @@ h5py
 icrawler
 scipy
 numpy
+tensorflow
+
+python3
