@@ -1,3 +1,4 @@
+#Goal: Simple feed forward network
 import tensorflow as tf
 import numpy as np
 
