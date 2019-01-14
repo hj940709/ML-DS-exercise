@@ -26,7 +26,7 @@ class BiLSTM():
         defaultParams = {'epoch': 1, 'miniBatchSize': 50,
                          'modelSavePath': '/cs/puls/Resources/models/English',
                          'dropout': (0.25, 0.25),
-                         'embedding': "/cs/puls/Resources/embeddings/GoogleNews-vectors-negative300.bin",
+                         'embedding': "/cs/puls/Resources/embeddings/Finnish/fin-word2vec-lemma-100.bin",
                          'classifier': 'crf',
                          'crf': {
                              'learn-mode': 'join',
@@ -66,7 +66,7 @@ class BiLSTM():
                              'clipnorm': 1,
                          },
                          'earlyStopping': 5,
-                         'featureNames': ['tokens', 'casing', 'character'],
+                         'featureNames': ['token', 'casing', 'character', 'pos'],
                          'addFeatureDimensions': 10}
 
         self.activation_map = {
@@ -119,25 +119,26 @@ class BiLSTM():
             embedding = KeyedVectors.load_word2vec_format(tmp_file, binary=False)
         else:
             embedding = KeyedVectors.load_word2vec_format(self.params['embedding'], binary=True)
-        self.embeddings = embedding.syn0
+        #self.embeddings = embedding.syn0
         # Add padding+unknown
         self.word2Idx["PADDING_TOKEN"] = len(self.word2Idx)
-        self.embeddings = np.vstack((np.zeros(self.embeddings.shape[1]), self.embeddings))
+        self.embeddings = np.zeros(embedding.syn0.shape[1])
         self.word2Idx["AMBIGUOUS_TOKEN"] = len(self.word2Idx)
-        self.embeddings = np.vstack((np.random.uniform(-0.25, 0.25, self.embeddings.shape[1]), self.embeddings))
+        self.embeddings = np.vstack((np.random.uniform(-0.25, 0.25, embedding.syn0.shape[1]), self.embeddings))
         self.word2Idx["UNKNOWN_TOKEN"] = len(self.word2Idx)
-        self.embeddings = np.vstack((np.random.uniform(-0.25, 0.25, self.embeddings.shape[1]), self.embeddings))
+        self.embeddings = np.vstack((np.random.uniform(-0.25, 0.25, embedding.syn0.shape[1]), self.embeddings))
+        self.embeddings = np.vstack((self.embeddings, embedding.syn0))
         temp = len(self.word2Idx)
         self.word2Idx.update({v:k + temp for k,v in enumerate(embedding.index2word)})
 
 
     def tokenInput(self):
         tokens_input = tf.placeholder(tf.int32, [None, None], name='words_input')
-        W = tf.Variable(tf.constant(0.0, shape=[len(self.word2Idx), len(self.embeddings)], name="W_token"), trainable=False)
-        embeddings = tf.placeholder(tf.float32, [len(self.word2Idx), len(self.embeddings)])
-        W.assign(embeddings)
+        W = tf.Variable(tf.constant(self.embeddings, name="W_token"), trainable=False)
         tokens = tf.nn.embedding_lookup(W, tokens_input, name='tokens')
-        print(tokens.shape)
+        del self.embeddings
+        tokens = tf.cast(tokens, tf.float64)
+        print('Embedding Shape:', tokens.shape)
         '''
         tokens_input = Input(shape=(None,), name='words_input')
         tokens = Embedding(input_dim=self.embeddings.shape[0], output_dim=self.embeddings.shape[1],
@@ -150,7 +151,8 @@ class BiLSTM():
         W = tf.Variable(tf.random_uniform([len(self.params['casingEntries']),
                                            self.params['addFeatureDimensions']], -1.0, 1.0), name="W_case")
         casings = tf.nn.embedding_lookup(W, casing_input, name='casings')
-        print(casings.shape)
+        casings = tf.cast(casings, tf.float64)
+        print('Casing Shape:', casings.shape)
         '''
         casing_input = Input(shape=(None, ),name='casing_input')
         casings = Embedding(input_dim=len(self.params['casingEntries']),
@@ -159,13 +161,14 @@ class BiLSTM():
         return casing_input, casings
 
     def posInput(self):
-        pos_input = tf.placeholder(tf.int32, [None, len(self.params['posEntries'])], name='pos_input')
+        pos_input = tf.placeholder(tf.int32, [None, None, len(self.params['posEntries'])], name='pos_input')
         pos = tf.layers.Dense(self.params['pos']['num_units'],
                               activation=self.activation_map[self.params['casing']['activation']],
                               name='pos_dense')(pos_input)
         if self.params['pos'].get('dropout'):
             pos = tf.layers.Dropout(self.params['casing'].get('dropout'), name='pos_dropout')(pos)
-        print(pos.shape)
+        pos = tf.cast(pos, tf.float64)
+        print('POS Shape:', pos.shape)
         '''
         pos_input = Input(shape=(None, len(self.params['posEntries'])), name='pos_input')
         pos = Dense(self.params['pos']['num_units'],
@@ -186,7 +189,7 @@ class BiLSTM():
             lstm_fw_cell = tf.nn.rnn_cell.BasicLSTMCell(self.params['character']['charLSTMSize'])
             lstm_bw_cell = tf.nn.rnn_cell.BasicLSTMCell(self.params['character']['charLSTMSize'])
             (output_fw, output_bw), _ = \
-                tf.nn.bidirectional_dynamic_rnn(lstm_fw_cell, lstm_bw_cell, chars, dtype=tf.float32, name="char_lstm")
+                tf.nn.bidirectional_dynamic_rnn(lstm_fw_cell, lstm_bw_cell, chars, dtype=tf.float32)
             chars = tf.concat([output_fw, output_bw], axis=-1)
             chars = tf.reshape(chars, [-1, tf.shape(chars_input)[-2], self.params['character']['charLSTMSize']*2])
             '''
@@ -214,21 +217,22 @@ class BiLSTM():
             chars = TimeDistributed(GlobalMaxPooling1D(), name="char_pooling")(chars)
             chars = TimeDistributed(Masking(mask_value=0), name="char_mask")(chars)
             '''
+        chars = tf.cast(chars, tf.float64)
+        print('CharEmbedding Shape:', chars.shape)
+        del self.charEmbeddings
         #chars = tf.reshape(chars, [-1, tf.shape(chars_input)[-2], tf.shape(chars)[-1]])
         return chars_input, chars
 
     def buildModel(self):
         if self.session is None:
             self.session = tf.Session()
-        else:
-            tf.reset_default_graph()
-
         label = tf.placeholder(tf.int32, [None, None], name='label')
         sentence_length = tf.placeholder(tf.int32, [None], name='sentence_length')
         input_nodes = [self.featureMap[_]()
                        for _ in self.params['featureNames'] if _ in self.featureMap.keys()]
-        merged = tf.concat([_[1] for _ in input_nodes], axis=1)
+        merged = tf.concat([_[1] for _ in input_nodes], axis=-1)
         merged_input_shape = tf.shape(merged)
+        print('Feature Concatnated:', merged_input_shape)
         cnt = 1
         for size in self.params['LSTM-Size']:
             lstm_fw_cell = tf.nn.rnn_cell.BasicLSTMCell(size, name="merged_fw_lstm_"+ str(cnt))
@@ -241,7 +245,7 @@ class BiLSTM():
                                                              input_keep_prob=1 - self.params['dropout'][0],
                                                              output_keep_prob=1 - self.params['dropout'][1])
                 (output_fw, output_bw), _ = tf.nn.bidirectional_dynamic_rnn(lstm_fw_cell, lstm_bw_cell, merged,
-                                               dtype=tf.float32)
+                                               dtype=tf.float64)
                 merged = tf.concat([output_fw, output_bw], axis=-1)
                 '''
                 merged_input = Bidirectional(LSTM(size, return_sequences=True, dropout=self.params['dropout'][0],
@@ -251,7 +255,7 @@ class BiLSTM():
             else:
                 """ Naive dropout """
                 (output_fw, output_bw), _ = tf.nn.bidirectional_dynamic_rnn(lstm_fw_cell, lstm_bw_cell, merged,
-                                                                            dtype=tf.float32)
+                                                                            dtype=tf.float64)
                 merged = tf.concat([output_fw, output_bw], axis=-1)
                 merged = tf.layers.Dropout(self.params['dropout'],
                                                  name='shared_dropout_'+ str(cnt))(merged)
@@ -263,9 +267,9 @@ class BiLSTM():
                                                    name='shared_dropout_' + str(self.params['dropout']) + "_" + str(
                                                        cnt))(merged_input)
                 '''
+            print(cnt, 'BiLSTM Shape:', merged.shape)
             cnt += 1
-        print(merged.shape)
-        merged = tf.reshape(merged, [-1, self.params['LSTMSize'][-1]*2])
+        merged = tf.reshape(merged, [-1, self.params['LSTM-Size'][-1]*2])
         if self.params['classifier'].lower() == 'softmax':
             merged = tf.layers.Dense(len(self.params['labelEntries']),
                                      activation=self.activation_map['softmax'], name='output')(merged)
@@ -282,8 +286,8 @@ class BiLSTM():
         elif self.params['classifier'].upper() == 'CRF':
             merged = tf.layers.Dense(len(self.params['labelEntries']), name="hidden_lin_layer")(merged)
             merged = tf.reshape(merged, [-1, merged_input_shape[-2], len(self.params['labelEntries'])])
-            log_likelihood, transition_params = tf.contrib.crf.crf_log_likelihood(merged, tf.squeeze(label),
-                                                                                  sentence_length)
+            log_likelihood, transition_params = tf.contrib.crf.crf_log_likelihood(tf.case(merged, tf.float32),
+                                                                                  tf.squeeze(label), sentence_length)
             loss = -log_likelihood
             print(merged.shape)
             output, viterbi_score = tf.contrib.crf.crf_decode(merged, transition_params,
@@ -298,7 +302,7 @@ class BiLSTM():
             acc = crf.accuracy
             '''
         self.output = output
-        self.loss = loss
+        self.score = viterbi_score
         lossFct = tf.reduce_mean(loss)
         optimizerParams = {k: v for k, v in self.params['optimizer'].items() if k not in ['type', 'clipnorm', 'clipvalue']}
         if self.params['optimizer']['type'].lower() == 'adam':
@@ -487,9 +491,11 @@ class BiLSTM():
 
     def model_predict(self, dict):
         if self.params['classifier'].lower() == 'softmax':
-            self.session.run(self.output, feed_dict=dict)
+            result = self.session.run(self.output, feed_dict=dict)
         elif self.params['classifier'].upper() == 'CRF':
-            pass
+            result, score = self.session.run([self.output, self.score], feed_dict=dict)
+
+        return result
 
     def train(self, random_initilize=False):
         if random_initilize:
@@ -501,7 +507,8 @@ class BiLSTM():
 
 
 
-BiLSTM()
+
+BiLSTM().buildModel()
 #f1-score, clipnorm and clipvalue in training process
 '''
 grad_vars = optimizer.compute_gradients(self.loss)
