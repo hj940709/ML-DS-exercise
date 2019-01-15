@@ -43,7 +43,7 @@ class BiLSTM():
                          'labelEntries': ['B-PER', 'B-LOC', 'B-ORG', 'B-PRO', 'B-OTH',
                                           'I-PER', 'I-LOC', 'I-ORG', 'I-PRO', 'I-OTH', 'O'],
                          'character': {
-                             'charEmbeddings': 'lstm',
+                             'charEmbeddings': 'cnn',
                              'charEmbeddingsSize': 30,
                              'charFilterSize': 30,
                              'charFilterLength': 3,
@@ -66,7 +66,7 @@ class BiLSTM():
                              'clipnorm': 1,
                          },
                          'earlyStopping': 5,
-                         'featureNames': ['token', 'casing', 'character', 'pos'],
+                         'featureNames': ['tokens', 'casing', 'character', 'pos'],
                          'addFeatureDimensions': 10}
 
         self.activation_map = {
@@ -119,7 +119,6 @@ class BiLSTM():
             embedding = KeyedVectors.load_word2vec_format(tmp_file, binary=False)
         else:
             embedding = KeyedVectors.load_word2vec_format(self.params['embedding'], binary=True)
-        #self.embeddings = embedding.syn0
         # Add padding+unknown
         self.word2Idx["PADDING_TOKEN"] = len(self.word2Idx)
         self.embeddings = np.zeros(embedding.syn0.shape[1])
@@ -133,7 +132,7 @@ class BiLSTM():
 
 
     def tokenInput(self):
-        tokens_input = tf.placeholder(tf.int32, [None, None], name='words_input')
+        tokens_input = tf.placeholder(tf.int32, [None, None], name='tokens_input')
         W = tf.Variable(tf.constant(self.embeddings, name="W_token"), trainable=False)
         tokens = tf.nn.embedding_lookup(W, tokens_input, name='tokens')
         del self.embeddings
@@ -162,6 +161,7 @@ class BiLSTM():
 
     def posInput(self):
         pos_input = tf.placeholder(tf.int32, [None, None, len(self.params['posEntries'])], name='pos_input')
+        #pos = tf.reshape(pos_input, [-1, len(self.params['posEntries'])])
         pos = tf.layers.Dense(self.params['pos']['num_units'],
                               activation=self.activation_map[self.params['casing']['activation']],
                               name='pos_dense')(pos_input)
@@ -179,13 +179,13 @@ class BiLSTM():
         return pos_input, pos
 
     def charInput(self):
-        chars_input = tf.placeholder(tf.int32, [None, None, self.params['character']['maxCharLength']], name='char_input')
+        chars_input = tf.placeholder(tf.int32, [None, None, self.params['character']['maxCharLength']], name='chars_input')
         # chars_input = Input(shape=(None, self.params['character']['maxCharLength']), name='char_input')
         W = tf.Variable(tf.random_uniform([self.charEmbeddings.shape[0],
                                            self.charEmbeddings.shape[1]], -1.0, 1.0), name="W_char")
         chars = tf.nn.embedding_lookup(W, chars_input, name='char_emd')
+        chars = tf.reshape(chars, [-1, self.params['character']['maxCharLength'], self.charEmbeddings.shape[1]])
         if self.params['character']['charEmbeddings'].lower() == 'lstm':
-            chars = tf.reshape(chars, [-1, self.params['character']['maxCharLength'], self.charEmbeddings.shape[1]])
             lstm_fw_cell = tf.nn.rnn_cell.BasicLSTMCell(self.params['character']['charLSTMSize'])
             lstm_bw_cell = tf.nn.rnn_cell.BasicLSTMCell(self.params['character']['charLSTMSize'])
             (output_fw, output_bw), _ = \
@@ -201,10 +201,17 @@ class BiLSTM():
             chars = TimeDistributed(Bidirectional(LSTM(charLSTMSize, return_sequences=False)), name="char_lstm")(chars)
             '''
         else:
+            chars = tf.layers.Conv1D(self.params['character']['charFilterSize'],
+                                     self.params['character']['charFilterLength'], padding='same',
+                                     name='char_cnn')(chars)
+            chars = tf.layers.MaxPooling1D(self.params['character']['maxCharLength'],
+                                           self.params['character']['maxCharLength'], name="char_pooling")(chars)
+            '''
             chars = tf.layers.Conv2D(self.params['character']['charFilterSize'],
                                      [1, self.params['character']['charFilterLength']], padding='same', name='char_cnn')(chars)
             chars = tf.layers.MaxPooling2D([1, self.params['character']['maxCharLength']],
                                            strides=self.params['character']['maxCharLength'], name="char_pooling")(chars)
+            '''
             chars = tf.reshape(chars, [-1, tf.shape(chars_input)[-2], self.params['character']['charFilterSize']])
             '''
             # Use CNNs for character embeddings from Ma and Hovy, 2016
@@ -224,15 +231,14 @@ class BiLSTM():
         return chars_input, chars
 
     def buildModel(self):
-        if self.session is None:
-            self.session = tf.Session()
+        tf.reset_default_graph()
         label = tf.placeholder(tf.int32, [None, None], name='label')
-        sentence_length = tf.placeholder(tf.int32, [None], name='sentence_length')
+        sentence_length = tf.placeholder(tf.int32, [1], name='sentence_length')
         input_nodes = [self.featureMap[_]()
                        for _ in self.params['featureNames'] if _ in self.featureMap.keys()]
         merged = tf.concat([_[1] for _ in input_nodes], axis=-1)
         merged_input_shape = tf.shape(merged)
-        print('Feature Concatnated:', merged_input_shape)
+        print('Feature Concatnated:', merged.shape)
         cnt = 1
         for size in self.params['LSTM-Size']:
             lstm_fw_cell = tf.nn.rnn_cell.BasicLSTMCell(size, name="merged_fw_lstm_"+ str(cnt))
@@ -274,7 +280,6 @@ class BiLSTM():
             merged = tf.layers.Dense(len(self.params['labelEntries']),
                                      activation=self.activation_map['softmax'], name='output')(merged)
             merged = tf.reshape(merged, [-1, merged_input_shape[-2], len(self.params['labelEntries'])])
-            print(merged.shape)
             loss = tf.nn.sparse_softmax_cross_entropy_with_logits(labels=label, logits=merged)
             output = tf.argmax(merged, axis=1)
             '''
@@ -286,12 +291,12 @@ class BiLSTM():
         elif self.params['classifier'].upper() == 'CRF':
             merged = tf.layers.Dense(len(self.params['labelEntries']), name="hidden_lin_layer")(merged)
             merged = tf.reshape(merged, [-1, merged_input_shape[-2], len(self.params['labelEntries'])])
-            log_likelihood, transition_params = tf.contrib.crf.crf_log_likelihood(tf.case(merged, tf.float32),
-                                                                                  tf.squeeze(label), sentence_length)
+            log_likelihood, transition_params = tf.contrib.crf.crf_log_likelihood(tf.cast(merged, tf.float32),
+                                                                                  label, sentence_length)
             loss = -log_likelihood
-            print(merged.shape)
-            output, viterbi_score = tf.contrib.crf.crf_decode(merged, transition_params,
-                                                              sentence_length)
+
+            output, viterbi_score = tf.contrib.crf.crf_decode(tf.cast(merged, tf.float32),
+                                                              transition_params, sentence_length)
             '''
             output = TimeDistributed(Dense(len(self.params['labelEntries']), activation=None),
                                      name='hidden_lin_layer')(merged_input)
@@ -301,6 +306,7 @@ class BiLSTM():
             lossFct = crf.loss_function
             acc = crf.accuracy
             '''
+        print('Output Shape:', merged.shape)
         self.output = output
         self.score = viterbi_score
         lossFct = tf.reduce_mean(loss)
@@ -420,7 +426,7 @@ class BiLSTM():
                     word['char'] = char
                     # Lemma and POS Encoding
                     word['lemma'] = self.word2Idx.get(word.get('lemma')) or self.word2Idx['UNKNOWN_TOKEN']
-                    '''
+
                     analyses = word.pop('analyses')
                     if len(analyses) == 0:
                         if 'tokens' in self.params['featureNames']:
@@ -453,7 +459,6 @@ class BiLSTM():
                                             break
                         POS = set([pos2Idx.get(analysis[-1]['pos'], pos2Idx['other']) for analysis in analyses])
                         word['pos'] = encode(POS, pos2Idx)
-                    '''
                     # Label Encoding
                     # word['label'] = encode([label2Idx[word['label']]], label2Idx)
                     if hasLabel:
@@ -473,15 +478,16 @@ class BiLSTM():
             data = self.dataset['data'][k][i:j]
             x = {}
             if 'tokens' in self.params['featureNames']:
-                x['words_input'] = np.array([[_['lemma'] for _ in sent] for sent in data])
+                x['tokens_input:0'] = np.array([[_['lemma'] for _ in sent] for sent in data])
             if 'character' in self.params['featureNames']:
-                x['char_input'] = np.array([[_['char'] for _ in sent] for sent in data])
+                x['chars_input:0'] = np.array([[_['char'] for _ in sent] for sent in data])
             if 'pos' in self.params['featureNames']:
-                x['pos_input'] = np.array([[_['pos'] for _ in sent] for sent in data])
+                x['pos_input:0'] = np.array([[_['pos'] for _ in sent] for sent in data])
             if 'casing' in self.params['featureNames']:
-                x['casing_input'] = np.array([[_['casing'] for _ in sent] for sent in data])
-            x.update({'label': np.array([[_['label'] for _ in sent] for sent in data])})
-            x.update({'sentence_length': len(data[0])})
+                x['casing_input:0'] = np.array([[_['casing'] for _ in sent] for sent in data])
+            x.update({'label:0': np.array([[_['label'][0] for _ in sent] for sent in data])})
+            x.update({'sentence_length:0': np.array([len(data[0])])})
+            print({k:v.shape for k, v in x.items()})
             yield x
             if j == len(self.dataset['data'][k]):
                 i = 0
@@ -498,6 +504,8 @@ class BiLSTM():
         return result
 
     def train(self, random_initilize=False):
+        if self.session is None:
+            self.session = tf.Session()
         if random_initilize:
             self.session.run(tf.global_variables_initializer())
         progress = trange(self.params['epoch'])
@@ -505,18 +513,9 @@ class BiLSTM():
             self.session.run(self.train_op, feed_dict=next(self.datagenerator))
 
 
+import pickle
+from BiLSTM import BiLSTM
 
-
-
-BiLSTM().buildModel()
-#f1-score, clipnorm and clipvalue in training process
-'''
-grad_vars = optimizer.compute_gradients(self.loss)
-grad_vars = [
-    (tf.clip_by_norm(grad, self.args.grad_clipping), var)
-    if grad is not None else (grad, var)
-    for grad, var in grad_vars]
-self.train_op = optimizer.apply_gradients(grad_vars, self.step)
-
-'''
-
+sample = pickle.load(open('finnish_sample.pkl', 'rb'))
+model = BiLSTM(raw_dataset=sample)
+model.train(random_initilize=True)
