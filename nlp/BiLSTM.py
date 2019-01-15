@@ -184,14 +184,16 @@ class BiLSTM():
         W = tf.Variable(tf.random_uniform([self.charEmbeddings.shape[0],
                                            self.charEmbeddings.shape[1]], -1.0, 1.0), name="W_char")
         chars = tf.nn.embedding_lookup(W, chars_input, name='char_emd')
-        chars = tf.reshape(chars, [-1, self.params['character']['maxCharLength'], self.charEmbeddings.shape[1]])
         if self.params['character']['charEmbeddings'].lower() == 'lstm':
+            chars = tf.reshape(chars, [-1, self.params['character']['maxCharLength'], self.charEmbeddings.shape[1]])
+            sentence_length = tf.shape(chars_input)[-2]
             lstm_fw_cell = tf.nn.rnn_cell.BasicLSTMCell(self.params['character']['charLSTMSize'])
             lstm_bw_cell = tf.nn.rnn_cell.BasicLSTMCell(self.params['character']['charLSTMSize'])
             (output_fw, output_bw), _ = \
-                tf.nn.bidirectional_dynamic_rnn(lstm_fw_cell, lstm_bw_cell, chars, dtype=tf.float32)
+                tf.nn.bidirectional_dynamic_rnn(lstm_fw_cell, lstm_bw_cell, chars, 
+                    sequence_length=sentence_length,dtype=tf.float32)
             chars = tf.concat([output_fw, output_bw], axis=-1)
-            chars = tf.reshape(chars, [-1, tf.shape(chars_input)[-2], self.params['character']['charLSTMSize']*2])
+            chars = tf.reshape(chars, [-1, sentence_length, self.params['character']['charLSTMSize']*2])
             '''
             # Use LSTM for char embeddings from Lample et al., 2016
             chars = TimeDistributed(
@@ -201,18 +203,11 @@ class BiLSTM():
             chars = TimeDistributed(Bidirectional(LSTM(charLSTMSize, return_sequences=False)), name="char_lstm")(chars)
             '''
         else:
-            chars = tf.layers.Conv1D(self.params['character']['charFilterSize'],
-                                     self.params['character']['charFilterLength'], padding='same',
-                                     name='char_cnn')(chars)
-            chars = tf.layers.MaxPooling1D(self.params['character']['maxCharLength'],
-                                           self.params['character']['maxCharLength'], name="char_pooling")(chars)
-            '''
-            chars = tf.layers.Conv2D(self.params['character']['charFilterSize'],
-                                     [1, self.params['character']['charFilterLength']], padding='same', name='char_cnn')(chars)
-            chars = tf.layers.MaxPooling2D([1, self.params['character']['maxCharLength']],
-                                           strides=self.params['character']['maxCharLength'], name="char_pooling")(chars)
-            '''
-            chars = tf.reshape(chars, [-1, tf.shape(chars_input)[-2], self.params['character']['charFilterSize']])
+            charFilterSize = self.params['character']['charFilterSize']
+            charFilterLength = self.params['character']['charFilterLength']
+            charsFilter = tf.Variable(tf.random_normal([1,1,charFilterLength,charFilterSize]))
+            chars = tf.nn.conv2d(chars, charsFilter, strides=[1, 1, 1, 1], padding='SAME', name='char_cnn')
+            chars = tf.reduce_max(chars, axis=-2, name="char_pooling")
             '''
             # Use CNNs for character embeddings from Ma and Hovy, 2016
             chars = TimeDistributed(
@@ -251,7 +246,7 @@ class BiLSTM():
                                                              input_keep_prob=1 - self.params['dropout'][0],
                                                              output_keep_prob=1 - self.params['dropout'][1])
                 (output_fw, output_bw), _ = tf.nn.bidirectional_dynamic_rnn(lstm_fw_cell, lstm_bw_cell, merged,
-                                               dtype=tf.float64)
+                                               sequence_length=sentence_length, dtype=tf.float64)
                 merged = tf.concat([output_fw, output_bw], axis=-1)
                 '''
                 merged_input = Bidirectional(LSTM(size, return_sequences=True, dropout=self.params['dropout'][0],
@@ -261,7 +256,7 @@ class BiLSTM():
             else:
                 """ Naive dropout """
                 (output_fw, output_bw), _ = tf.nn.bidirectional_dynamic_rnn(lstm_fw_cell, lstm_bw_cell, merged,
-                                                                            dtype=tf.float64)
+                                                sequence_length=sentence_length,  dtype=tf.float64)
                 merged = tf.concat([output_fw, output_bw], axis=-1)
                 merged = tf.layers.Dropout(self.params['dropout'],
                                                  name='shared_dropout_'+ str(cnt))(merged)
