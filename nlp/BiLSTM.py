@@ -190,8 +190,8 @@ class BiLSTM():
         chars = tf.nn.embedding_lookup(W, chars_input, name='char_emd')
         if self.params['character']['charEmbeddings'].lower() == 'lstm':
             chars = tf.reshape(chars, [-1, self.params['character']['maxCharLength'], self.charEmbeddings.shape[1]])
-            lstm_fw_cell = tf.nn.rnn_cell.BasicLSTMCell(self.params['character']['charLSTMSize'])
-            lstm_bw_cell = tf.nn.rnn_cell.BasicLSTMCell(self.params['character']['charLSTMSize'])
+            lstm_fw_cell = tf.nn.rnn_cell.LSTMCell(self.params['character']['charLSTMSize'])
+            lstm_bw_cell = tf.nn.rnn_cell.LSTMCell(self.params['character']['charLSTMSize'])
             (output_fw, output_bw), _ = \
                 tf.nn.bidirectional_dynamic_rnn(lstm_fw_cell, lstm_bw_cell, chars, 
                     sequence_length=sentence_length,dtype=tf.float32)
@@ -240,8 +240,8 @@ class BiLSTM():
         print('Feature Concatnated:', merged.shape)
         cnt = 1
         for size in self.params['LSTM-Size']:
-            lstm_fw_cell = tf.nn.rnn_cell.BasicLSTMCell(size, name="merged_fw_lstm_"+ str(cnt))
-            lstm_bw_cell = tf.nn.rnn_cell.BasicLSTMCell(size, name="merged_bw_lstm_"+ str(cnt))
+            lstm_fw_cell = tf.nn.rnn_cell.LSTMCell(size, name="merged_fw_lstm_"+ str(cnt))
+            lstm_bw_cell = tf.nn.rnn_cell.LSTMCell(size, name="merged_bw_lstm_"+ str(cnt))
             if isinstance(self.params['dropout'], (list, tuple)):
                 lstm_fw_cell = tf.nn.rnn_cell.DropoutWrapper(lstm_fw_cell,
                                                              input_keep_prob=1 - self.params['dropout'][0],
