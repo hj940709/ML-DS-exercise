@@ -18,7 +18,7 @@ class BiLSTM():
         self.word2Idx = word2Idx
         self.charEmbeddings = None
         self.char2Idx = {}
-        self.model = None
+        self.session = None
         self.datagenerator = None
         self.featureMap = {'tokens': self.tokenInput, 'casing': self.casingInput,
                            'character': self.charInput, 'pos': self.posInput}
@@ -27,7 +27,7 @@ class BiLSTM():
                          'modelSavePath': '/cs/puls/Resources/models/English',
                          'dropout': (0.25, 0.25),
                          'embedding': "/cs/puls/Resources/embeddings/Finnish/fin-word2vec-lemma-100.bin",
-                         'classifier': 'crf',
+                         'classifier': 'softmax',
                          'crf': {
                              'learn-mode': 'join',
                              'test-mode': 'marginal'
@@ -86,9 +86,13 @@ class BiLSTM():
 
         self.params = defaultParams
         self.dataset = {}
-        self.session = None
         if 'tokens' in self.params['featureNames'] and not len(self.word2Idx):
             self.loadWordEmbedding()
+        elif len(self.word2Idx):
+            self.char2Idx = {"PADDING": 0, "UNKNOWN": 1}
+            self.char2Idx.update({char:i+len(self.char2Idx)
+                                  for i,char in enumerate(self.params['charEntries'])})
+            return
         self.loadCharEmbedding()
         if raw_dataset and encoded_dataset is None:
             self.setRawDataset(raw_dataset)
@@ -131,7 +135,7 @@ class BiLSTM():
         self.word2Idx.update({v:k + temp for k,v in enumerate(embedding.index2word)})
 
 
-    def tokenInput(self):
+    def tokenInput(self, sentence_length=None):
         tokens_input = tf.placeholder(tf.int32, [None, None], name='tokens_input')
         W = tf.Variable(tf.constant(self.embeddings, name="W_token"), trainable=False)
         tokens = tf.nn.embedding_lookup(W, tokens_input, name='tokens')
@@ -145,7 +149,7 @@ class BiLSTM():
         '''
         return tokens_input, tokens
 
-    def casingInput(self):
+    def casingInput(self, sentence_length=None):
         casing_input = tf.placeholder(tf.int32, [None, None],name='casing_input')
         W = tf.Variable(tf.random_uniform([len(self.params['casingEntries']),
                                            self.params['addFeatureDimensions']], -1.0, 1.0), name="W_case")
@@ -159,7 +163,7 @@ class BiLSTM():
         '''
         return casing_input, casings
 
-    def posInput(self):
+    def posInput(self, sentence_length=None):
         pos_input = tf.placeholder(tf.int32, [None, None, len(self.params['posEntries'])], name='pos_input')
         #pos = tf.reshape(pos_input, [-1, len(self.params['posEntries'])])
         pos = tf.layers.Dense(self.params['pos']['num_units'],
@@ -178,7 +182,7 @@ class BiLSTM():
         '''
         return pos_input, pos
 
-    def charInput(self):
+    def charInput(self, sentence_length=None):
         chars_input = tf.placeholder(tf.int32, [None, None, self.params['character']['maxCharLength']], name='chars_input')
         # chars_input = Input(shape=(None, self.params['character']['maxCharLength']), name='char_input')
         W = tf.Variable(tf.random_uniform([self.charEmbeddings.shape[0],
@@ -186,7 +190,6 @@ class BiLSTM():
         chars = tf.nn.embedding_lookup(W, chars_input, name='char_emd')
         if self.params['character']['charEmbeddings'].lower() == 'lstm':
             chars = tf.reshape(chars, [-1, self.params['character']['maxCharLength'], self.charEmbeddings.shape[1]])
-            sentence_length = tf.shape(chars_input)[-2]
             lstm_fw_cell = tf.nn.rnn_cell.BasicLSTMCell(self.params['character']['charLSTMSize'])
             lstm_bw_cell = tf.nn.rnn_cell.BasicLSTMCell(self.params['character']['charLSTMSize'])
             (output_fw, output_bw), _ = \
@@ -205,7 +208,8 @@ class BiLSTM():
         else:
             charFilterSize = self.params['character']['charFilterSize']
             charFilterLength = self.params['character']['charFilterLength']
-            charsFilter = tf.Variable(tf.random_normal([1,1,charFilterLength,charFilterSize]))
+            charsFilter = tf.Variable(tf.random_normal([1, charFilterLength,
+                                                        self.charEmbeddings.shape[1], charFilterSize]))
             chars = tf.nn.conv2d(chars, charsFilter, strides=[1, 1, 1, 1], padding='SAME', name='char_cnn')
             chars = tf.reduce_max(chars, axis=-2, name="char_pooling")
             '''
@@ -228,8 +232,8 @@ class BiLSTM():
     def buildModel(self):
         tf.reset_default_graph()
         label = tf.placeholder(tf.int32, [None, None], name='label')
-        sentence_length = tf.placeholder(tf.int32, [1], name='sentence_length')
-        input_nodes = [self.featureMap[_]()
+        sentence_length = tf.placeholder(tf.int32, [None], name='sentence_length')
+        input_nodes = [self.featureMap[_](sentence_length=sentence_length)
                        for _ in self.params['featureNames'] if _ in self.featureMap.keys()]
         merged = tf.concat([_[1] for _ in input_nodes], axis=-1)
         merged_input_shape = tf.shape(merged)
@@ -276,7 +280,7 @@ class BiLSTM():
                                      activation=self.activation_map['softmax'], name='output')(merged)
             merged = tf.reshape(merged, [-1, merged_input_shape[-2], len(self.params['labelEntries'])])
             loss = tf.nn.sparse_softmax_cross_entropy_with_logits(labels=label, logits=merged)
-            output = tf.argmax(merged, axis=1)
+            output = tf.argmax(merged, axis=1, name="softmax_output")
             '''
             output = TimeDistributed(Dense(len(self.params['labelEntries']),
                                            activation='softmax'), name='output')(merged_input)
@@ -286,12 +290,14 @@ class BiLSTM():
         elif self.params['classifier'].upper() == 'CRF':
             merged = tf.layers.Dense(len(self.params['labelEntries']), name="hidden_lin_layer")(merged)
             merged = tf.reshape(merged, [-1, merged_input_shape[-2], len(self.params['labelEntries'])])
-            log_likelihood, transition_params = tf.contrib.crf.crf_log_likelihood(tf.cast(merged, tf.float32),
+            merged = tf.cast(merged, tf.float32, name='output')
+            log_likelihood, transition_params = tf.contrib.crf.crf_log_likelihood(merged,
                                                                                   label, sentence_length)
             loss = -log_likelihood
 
-            output, viterbi_score = tf.contrib.crf.crf_decode(tf.cast(merged, tf.float32),
-                                                              transition_params, sentence_length)
+            output, viterbi_score = tf.contrib.crf.crf_decode(merged, transition_params, sentence_length)
+            output = tf.identity(output, name="crf_output")
+            score = tf.identity(viterbi_score, name="score")
             '''
             output = TimeDistributed(Dense(len(self.params['labelEntries']), activation=None),
                                      name='hidden_lin_layer')(merged_input)
@@ -302,10 +308,9 @@ class BiLSTM():
             acc = crf.accuracy
             '''
         print('Output Shape:', merged.shape)
-        self.output = output
-        self.score = viterbi_score
-        lossFct = tf.reduce_mean(loss)
+        lossFct = tf.reduce_mean(loss, name='loss')
         optimizerParams = {k: v for k, v in self.params['optimizer'].items() if k not in ['type', 'clipnorm', 'clipvalue']}
+        optimizerParams['name'] = 'train_op'
         if self.params['optimizer']['type'].lower() == 'adam':
             opt = tf.train.AdamOptimizer(**optimizerParams)
         elif self.params['optimizer']['type'].lower() == 'nadam':
@@ -329,7 +334,7 @@ class BiLSTM():
                               abs(self.params['optimizer']['clipvalue'])), var)
             if grad is not None else (grad, var)
             for grad, var in grad_vars]
-        self.train_op = opt.apply_gradients(grad_vars)
+        opt.apply_gradients(grad_vars)
 
     def setRawDataset(self, dataset):
         self.dataEncoding(dataset['data'])
@@ -481,7 +486,7 @@ class BiLSTM():
             if 'casing' in self.params['featureNames']:
                 x['casing_input:0'] = np.array([[_['casing'] for _ in sent] for sent in data])
             x.update({'label:0': np.array([[_['label'][0] for _ in sent] for sent in data])})
-            x.update({'sentence_length:0': np.array([len(data[0])])})
+            x.update({'sentence_length:0': np.array([len(sent) for sent in data])})
             print({k:v.shape for k, v in x.items()})
             yield x
             if j == len(self.dataset['data'][k]):
@@ -492,25 +497,104 @@ class BiLSTM():
 
     def model_predict(self, dict):
         if self.params['classifier'].lower() == 'softmax':
-            result = self.session.run(self.output, feed_dict=dict)
+            result = self.session.run('softmax_output:0', feed_dict=dict)
         elif self.params['classifier'].upper() == 'CRF':
-            result, score = self.session.run([self.output, self.score], feed_dict=dict)
+            result, score = self.session.run(['crf_output:0', 'score:0'], feed_dict=dict)
 
         return result
 
-    def train(self, random_initilize=False):
+    def fit(self, random_initilize=False):
         if self.session is None:
             self.session = tf.Session()
         if random_initilize:
             self.session.run(tf.global_variables_initializer())
         progress = trange(self.params['epoch'])
         for _ in progress:
-            self.session.run(self.train_op, feed_dict=next(self.datagenerator))
+            self.session.run('train_op', feed_dict=next(self.datagenerator))
+
+    def predict(self, tokens, toTag=False):
+        sents = []
+        for sent in tokens:
+            x = {}
+            if 'tokens' in self.params['featureNames']:
+                x['tokens_input:0'] = np.array([[_['lemma'] for _ in sent]])
+            if 'character' in self.params['featureNames']:
+                x['chars_input:0'] = np.array([[_['char'] for _ in sent]])
+            if 'pos' in self.params['featureNames']:
+                x['pos_input:0'] = np.array([[_['pos'] for _ in sent]])
+            if 'casing' in self.params['featureNames']:
+                x['casing_input:0'] = np.array([[_['casing'] for _ in sent]])
+            x.update({'sentence_length:0': np.array([len(sent)])})
+            y_pred = self.model_predict(x)[0]
+            if not toTag:
+                sents.append(y_pred)
+            else:
+                y_pred = [_.argmax(axis=-1) for _ in y_pred]
+                sents.append([self.params['labelEntries'][_] for _ in y_pred])
+        return sents
+
+    def evaluate(self, dataset, sortedBySize=False):
+        y_true = [w['label'][0] for g in dataset['data'] for s in g for w in s]
+        if sortedBySize:
+            data = dataset['data']
+            y_pred = []
+            for g in data:
+                x = {}
+                if 'tokens' in self.params['featureNames']:
+                    x['tokens_input:0'] = np.array([[_['lemma'] for _ in sent] for sent in g])
+                if 'character' in self.params['featureNames']:
+                    x['chars_input:0'] = np.array([[_['char'] for _ in sent] for sent in g])
+                if 'pos' in self.params['featureNames']:
+                    x['pos_input:0'] = np.array([[_['pos'] for _ in sent] for sent in g])
+                if 'casing' in self.params['featureNames']:
+                    x['casing_input:0'] = np.array([[_['casing'] for _ in sent] for sent in g])
+                x.update({'sentence_length:0': np.array([len(sent) for sent in g])})
+                y_g_pred = self.model_predict(x)
+                y_pred.extend([pred.argmax() for sent in y_g_pred for pred in sent])
+        else:
+            y_pred = [w.argmax() for g in dataset['data'] for s in self.predict(g) for w in s]
+        validLabels = [_ for _ in self.params['labelEntries'] if _ != 'O']
+        print(classification_report(y_true, y_pred, labels=[_ for _ in range(len(validLabels))],
+                                    target_names=validLabels))
+
+    def saveModel(self, path=None, initial_save=False, global_step=None):
+        import json, h5py
+        directory = path or self.params['modelSavePath']
+        self.params['modelSavePath'] = directory
+        if not os.path.exists(directory):
+            os.makedirs(directory)
+        if initial_save:
+            self.saver = tf.train.Saver(max_to_keep=5)
+        self.saver.save(self.session, os.path.join(directory, 'model'),
+                        global_step=global_step, write_meta_graph=initial_save)
+        #self.model.save(os.path.join(directory, 'model.h5'), True)
+        with h5py.File(os.path.join(directory, 'config.h5'), 'w') as f:
+            f.attrs['params'] = json.dumps(self.params)
+            f.attrs['word2Idx'] = json.dumps(self.word2Idx)
+
+    @staticmethod
+    def loadModel(path='bilstm-fin-ner'):
+        import tensorflow as tf
+        import json, h5py, os, sys
+        sys.path.append(os.path.abspath(os.path.dirname(__file__)))
+        with h5py.File(os.path.join(path, 'config.h5'), 'r') as f:
+            params = json.loads(f.attrs['params'])
+            word2Idx = json.loads(f.attrs['word2Idx'])
+        params['modelSavePath'] = path
+        model = BiLSTM(params=params, word2Idx=word2Idx)
+        model.session = tf.Session()
+        saved_model = tf.train.import_meta_graph(os.path.join(path, 'model.meta'))
+        saved_model.restore(model.session, tf.train.latest_checkpoint(path))
+        #model.model = keras.models.load_model(os.path.join(path, 'model.h5'), custom_objects=create_custom_objects())
+        return model
 
 
-import pickle
-from BiLSTM import BiLSTM
+if __name__ == '__main__':
+    import pickle
 
-sample = pickle.load(open('finnish_sample.pkl', 'rb'))
-model = BiLSTM(raw_dataset=sample)
-model.train(random_initilize=True)
+    # from BiLSTM import BiLSTM
+
+    sample = pickle.load(open('finnish_sample.pkl', 'rb'))
+    model = BiLSTM(raw_dataset=sample)
+    model.fit(random_initilize=True)
+    #model.saveModel(path='test', initial_save=True)
