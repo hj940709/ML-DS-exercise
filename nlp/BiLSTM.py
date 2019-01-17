@@ -309,6 +309,8 @@ class BiLSTM():
             '''
         print('Output Shape:', merged.shape)
         lossFct = tf.reduce_mean(loss, name='loss')
+        precision = tf.metrics.precision(label, output, name='precision')
+        recall = tf.metrics.recall(label, output, name='recall')
         optimizerParams = {k: v for k, v in self.params['optimizer'].items() if k not in ['type', 'clipnorm', 'clipvalue']}
         optimizerParams['name'] = 'train_op'
         if self.params['optimizer']['type'].lower() == 'adam':
@@ -335,6 +337,9 @@ class BiLSTM():
             if grad is not None else (grad, var)
             for grad, var in grad_vars]
         opt.apply_gradients(grad_vars)
+
+    def printSummary(self):
+        pass
 
     def setRawDataset(self, dataset):
         self.dataEncoding(dataset['data'])
@@ -487,7 +492,6 @@ class BiLSTM():
                 x['casing_input:0'] = np.array([[_['casing'] for _ in sent] for sent in data])
             x.update({'label:0': np.array([[_['label'][0] for _ in sent] for sent in data])})
             x.update({'sentence_length:0': np.array([len(sent) for sent in data])})
-            print({k:v.shape for k, v in x.items()})
             yield x
             if j == len(self.dataset['data'][k]):
                 i = 0
@@ -503,14 +507,21 @@ class BiLSTM():
 
         return result
 
-    def fit(self, random_initilize=False):
+    def fit(self):
         if self.session is None:
             self.session = tf.Session()
-        if random_initilize:
             self.session.run(tf.global_variables_initializer())
         progress = trange(self.params['epoch'])
         for _ in progress:
-            self.session.run('train_op', feed_dict=next(self.datagenerator))
+            batch = next(self.datagenerator)
+            self.session.run('train_op', feed_dict=batch)
+            loss = self.session.run('loss:0', feed_dict=batch)
+            precision, pre_op = self.session.run('precision:0', feed_dict=batch)
+            recall, rec_op = self.session.run('recall:0', feed_dict=batch)
+            score = precision * recall / (precision + recall)
+            progress.set_postfix_str('loss: '+ loss + ' prec: ' + precision +
+                                     ' rec: ' + recall + ' f1-score: ' + score)
+
 
     def predict(self, tokens, toTag=False):
         sents = []
