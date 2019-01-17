@@ -516,8 +516,8 @@ class BiLSTM():
             batch = next(self.datagenerator)
             self.session.run('train_op', feed_dict=batch)
             loss = self.session.run('loss:0', feed_dict=batch)
-            precision, pre_op = self.session.run('precision:0', feed_dict=batch)
-            recall, rec_op = self.session.run('recall:0', feed_dict=batch)
+            precision = self.session.run('precision/value:0', feed_dict=batch)
+            recall = self.session.run('recall/value:0', feed_dict=batch)
             score = precision * recall / (precision + recall)
             progress.set_postfix_str('loss: '+ loss + ' prec: ' + precision +
                                      ' rec: ' + recall + ' f1-score: ' + score)
