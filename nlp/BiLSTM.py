@@ -512,18 +512,31 @@ class BiLSTM():
             self.session = tf.Session()
             self.session.run(tf.global_variables_initializer())
             self.session.run(tf.local_variables_initializer())
-        progress = trange(self.params['epoch'])
-        for _ in progress:
-            batch = next(self.datagenerator)
-            self.session.run('train_op', feed_dict=batch)
-            loss = self.session.run('loss:0', feed_dict=batch)
-            precision = self.session.run('precision/update_op:0', feed_dict=batch)
-            recall = self.session.run('recall/update_op:0', feed_dict=batch)
-            if precision == 0 and recall == 0:
-                score = 0
+        best_score = 0
+        counter = 0
+        for epoch in range(self.params['epoch']):
+            progress = trange(self.dataset['num_sents'] // self.params['miniBatchSize'] + 1)
+            progress.set_description('Epoch '+str(epoch))
+            for _ in progress:
+                batch = next(self.datagenerator)
+                self.session.run('train_op', feed_dict=batch)
+                loss, precision, recall = self.session.run(['loss:0', 'precision/update_op:0', 'recall/update_op:0'],
+                                                           feed_dict=batch)
+                if precision == 0 and recall == 0:
+                    score = 0
+                else:
+                    score = precision * recall / (precision + recall)
+                progress.set_postfix_str(
+                    f'loss: %f, prec: %f, rec: %f, f1-score: %f' % (loss, precision, recall, score))
+            # Early Stopping
+            if score > best_score - 0.001:
+                counter = 0
+                best_score = score
             else:
-                score = precision * recall / (precision + recall)
-            progress.set_postfix_str(f'loss: %f, prec: %f, rec: %f, f1-score: %f'%(loss, precision, recall, score))
+                counter += 1
+            if counter > self.params['earlyStopping']:
+                print('Early Stopped')
+                break
 
 
     def predict(self, tokens, toTag=False):
@@ -577,9 +590,7 @@ class BiLSTM():
         self.params['modelSavePath'] = directory
         if not os.path.exists(directory):
             os.makedirs(directory)
-        if initial_save:
-            self.saver = tf.train.Saver(max_to_keep=5)
-        self.saver.save(self.session, os.path.join(directory, 'model'),
+        tf.train.Saver().save(self.session, os.path.join(directory, 'model'),
                         global_step=global_step, write_meta_graph=initial_save)
         #self.model.save(os.path.join(directory, 'model.h5'), True)
         with h5py.File(os.path.join(directory, 'config.h5'), 'w') as f:
