@@ -137,7 +137,7 @@ class BiLSTM():
 
     def tokenInput(self, sentence_length=None):
         tokens_input = tf.placeholder(tf.int32, [None, None], name='tokens_input')
-        W = tf.Variable(tf.constant(self.embeddings, name="W_token"), trainable=False)
+        W = tf.Variable(self.embeddings, trainable=False, name="W_token")
         tokens = tf.nn.embedding_lookup(W, tokens_input, name='tokens')
         del self.embeddings
         tokens = tf.cast(tokens, tf.float64)
@@ -511,6 +511,7 @@ class BiLSTM():
         if self.session is None:
             self.session = tf.Session()
             self.session.run(tf.global_variables_initializer())
+            self.session.run(tf.local_variables_initializer())
         progress = trange(self.params['epoch'])
         for _ in progress:
             batch = next(self.datagenerator)
