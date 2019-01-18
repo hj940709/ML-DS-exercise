@@ -27,7 +27,7 @@ class BiLSTM():
                          'modelSavePath': '/cs/puls/Resources/models/English',
                          'dropout': (0.25, 0.25),
                          'embedding': "/cs/puls/Resources/embeddings/Finnish/fin-word2vec-lemma-100.bin",
-                         'classifier': 'softmax',
+                         'classifier': 'crf',
                          'crf': {
                              'learn-mode': 'join',
                              'test-mode': 'marginal'
@@ -280,7 +280,7 @@ class BiLSTM():
                                      activation=self.activation_map['softmax'], name='output')(merged)
             merged = tf.reshape(merged, [-1, merged_input_shape[-2], len(self.params['labelEntries'])])
             loss = tf.nn.sparse_softmax_cross_entropy_with_logits(labels=label, logits=merged)
-            output = tf.argmax(merged, axis=1, name="softmax_output")
+            output = tf.argmax(merged, axis=-1, name="softmax_output")
             '''
             output = TimeDistributed(Dense(len(self.params['labelEntries']),
                                            activation='softmax'), name='output')(merged_input)
@@ -290,7 +290,7 @@ class BiLSTM():
         elif self.params['classifier'].upper() == 'CRF':
             merged = tf.layers.Dense(len(self.params['labelEntries']), name="hidden_lin_layer")(merged)
             merged = tf.reshape(merged, [-1, merged_input_shape[-2], len(self.params['labelEntries'])])
-            merged = tf.cast(merged, tf.float32, name='output')
+            merged = tf.cast(merged, tf.float32)
             log_likelihood, transition_params = tf.contrib.crf.crf_log_likelihood(merged,
                                                                                   label, sentence_length)
             loss = -log_likelihood
@@ -307,7 +307,7 @@ class BiLSTM():
             lossFct = crf.loss_function
             acc = crf.accuracy
             '''
-        print('Output Shape:', merged.shape)
+        print('Output Shape:', output.shape)
         lossFct = tf.reduce_mean(loss, name='loss')
         precision = tf.metrics.precision(label, output, name='precision')
         recall = tf.metrics.recall(label, output, name='recall')
@@ -517,11 +517,13 @@ class BiLSTM():
             batch = next(self.datagenerator)
             self.session.run('train_op', feed_dict=batch)
             loss = self.session.run('loss:0', feed_dict=batch)
-            precision = self.session.run('precision/value:0', feed_dict=batch)
-            recall = self.session.run('recall/value:0', feed_dict=batch)
-            score = precision * recall / (precision + recall)
-            progress.set_postfix_str('loss: '+ loss + ' prec: ' + precision +
-                                     ' rec: ' + recall + ' f1-score: ' + score)
+            precision = self.session.run('precision/update_op:0', feed_dict=batch)
+            recall = self.session.run('recall/update_op:0', feed_dict=batch)
+            if precision == 0 and recall == 0:
+                score = 0
+            else:
+                score = precision * recall / (precision + recall)
+            progress.set_postfix_str(f'loss: %f, prec: %f, rec: %f, f1-score: %f'%(loss, precision, recall, score))
 
 
     def predict(self, tokens, toTag=False):
@@ -608,5 +610,5 @@ if __name__ == '__main__':
 
     sample = pickle.load(open('finnish_sample.pkl', 'rb'))
     model = BiLSTM(raw_dataset=sample)
-    model.fit(random_initilize=True)
+    model.fit()
     #model.saveModel(path='test', initial_save=True)
