@@ -170,7 +170,7 @@ class BiLSTM():
                               activation=self.activation_map[self.params['casing']['activation']],
                               name='pos_dense')(pos_input)
         if self.params['pos'].get('dropout'):
-            pos = tf.layers.Dropout(self.params['casing'].get('dropout'), name='pos_dropout')(pos)
+            pos = tf.layers.Dropout(self.params['pos'].get('dropout'), name='pos_dropout')(pos)
         pos = tf.cast(pos, tf.float64)
         print('POS Shape:', pos.shape)
         '''
@@ -189,12 +189,10 @@ class BiLSTM():
                                            self.charEmbeddings.shape[1]], -1.0, 1.0), name="W_char")
         chars = tf.nn.embedding_lookup(W, chars_input, name='char_emd')
         if self.params['character']['charEmbeddings'].lower() == 'lstm':
-            chars = tf.reshape(chars, [-1, self.params['character']['maxCharLength'], self.charEmbeddings.shape[1]])
             lstm_fw_cell = tf.nn.rnn_cell.LSTMCell(self.params['character']['charLSTMSize'])
             lstm_bw_cell = tf.nn.rnn_cell.LSTMCell(self.params['character']['charLSTMSize'])
             (output_fw, output_bw), _ = \
-                tf.nn.bidirectional_dynamic_rnn(lstm_fw_cell, lstm_bw_cell, chars, 
-                    sequence_length=sentence_length,dtype=tf.float32)
+                tf.nn.bidirectional_dynamic_rnn(lstm_fw_cell, lstm_bw_cell, chars,dtype=tf.float32)
             chars = tf.concat([output_fw, output_bw], axis=-1)
             chars = tf.reshape(chars, [-1, sentence_length, self.params['character']['charLSTMSize']*2])
             '''
@@ -245,12 +243,12 @@ class BiLSTM():
             if isinstance(self.params['dropout'], (list, tuple)):
                 lstm_fw_cell = tf.nn.rnn_cell.DropoutWrapper(lstm_fw_cell,
                                                              input_keep_prob=1 - self.params['dropout'][0],
-                                                             output_keep_prob=1 - self.params['dropout'][1])
+                                                             state_keep_prob=1 - self.params['dropout'][1])
                 lstm_bw_cell = tf.nn.rnn_cell.DropoutWrapper(lstm_bw_cell,
                                                              input_keep_prob=1 - self.params['dropout'][0],
-                                                             output_keep_prob=1 - self.params['dropout'][1])
+                                                             state_keep_prob=1 - self.params['dropout'][1])
                 (output_fw, output_bw), _ = tf.nn.bidirectional_dynamic_rnn(lstm_fw_cell, lstm_bw_cell, merged,
-                                               sequence_length=sentence_length, dtype=tf.float64)
+                                                                            dtype=tf.float64)
                 merged = tf.concat([output_fw, output_bw], axis=-1)
                 '''
                 merged_input = Bidirectional(LSTM(size, return_sequences=True, dropout=self.params['dropout'][0],
@@ -260,7 +258,7 @@ class BiLSTM():
             else:
                 """ Naive dropout """
                 (output_fw, output_bw), _ = tf.nn.bidirectional_dynamic_rnn(lstm_fw_cell, lstm_bw_cell, merged,
-                                                sequence_length=sentence_length,  dtype=tf.float64)
+                                                 dtype=tf.float64)
                 merged = tf.concat([output_fw, output_bw], axis=-1)
                 merged = tf.layers.Dropout(self.params['dropout'],
                                                  name='shared_dropout_'+ str(cnt))(merged)
@@ -312,7 +310,7 @@ class BiLSTM():
         precision = tf.metrics.precision(label, output, name='precision')
         recall = tf.metrics.recall(label, output, name='recall')
         optimizerParams = {k: v for k, v in self.params['optimizer'].items() if k not in ['type', 'clipnorm', 'clipvalue']}
-        optimizerParams['name'] = 'train_op'
+        #optimizerParams['name'] = 'train_op'
         if self.params['optimizer']['type'].lower() == 'adam':
             opt = tf.train.AdamOptimizer(**optimizerParams)
         elif self.params['optimizer']['type'].lower() == 'nadam':
@@ -331,12 +329,15 @@ class BiLSTM():
             (tf.clip_by_norm(grad, self.params['optimizer']['clipnorm']), var)
             if grad is not None else (grad, var)
             for grad, var in grad_vars]
-        grad_vars = [
-            (tf.clip_by_value(grad, -abs(self.params['optimizer']['clipvalue']),
-                              abs(self.params['optimizer']['clipvalue'])), var)
-            if grad is not None else (grad, var)
-            for grad, var in grad_vars]
-        opt.apply_gradients(grad_vars)
+        if abs(self.params['optimizer']['clipvalue']) > 0:
+            grad_vars = [
+                (tf.clip_by_value(grad, -abs(self.params['optimizer']['clipvalue']),
+                                  abs(self.params['optimizer']['clipvalue'])), var)
+                if grad is not None else (grad, var)
+                for grad, var in grad_vars]
+        opt.apply_gradients(grad_vars, name='train_op')
+
+
 
     def printSummary(self):
         pass
@@ -481,6 +482,7 @@ class BiLSTM():
             k = k % len(self.dataset['data'])
             j = min(i + self.params['miniBatchSize'], len(self.dataset['data'][k]))
             data = self.dataset['data'][k][i:j]
+            np.random.shuffle(data)
             x = {}
             if 'tokens' in self.params['featureNames']:
                 x['tokens_input:0'] = np.array([[_['lemma'] for _ in sent] for sent in data])
@@ -513,6 +515,7 @@ class BiLSTM():
             self.session.run(tf.global_variables_initializer())
             self.session.run(tf.local_variables_initializer())
         best_score = 0
+        score = 0
         counter = 0
         for epoch in range(self.params['epoch']):
             progress = trange(self.dataset['num_sents'] // self.params['miniBatchSize'] + 1)
@@ -525,14 +528,14 @@ class BiLSTM():
                 if precision == 0 and recall == 0:
                     score = 0
                 else:
-                    score = precision * recall / (precision + recall)
+                    score = 2 * precision * recall / (precision + recall)
                 progress.set_postfix_str(
                     f'loss: %f, prec: %f, rec: %f, f1-score: %f' % (loss, precision, recall, score))
             # Early Stopping
-            if score > best_score - 0.001:
+            if score > best_score + 0.001:
                 counter = 0
                 best_score = score
-            else:
+            elif abs(best_score - score) < 0.001:
                 counter += 1
             if counter > self.params['earlyStopping']:
                 print('Early Stopped')
